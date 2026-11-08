@@ -1,0 +1,48 @@
+schema = 1
+
+[app]
+id = "voice-to-vault"
+name = "Voice memo to vault"
+version = "0.3.0"
+description = "Transcribe a voice memo, pull out tasks and decisions, append to the daily note."
+entry = "main:run"
+tags = ["capture", "obsidian"]
+
+[runtime]
+dependencies = []
+timeout_s = 120
+mode = "app"
+
+[inputs.audio]
+type = "file"
+accept = ["m4a", "wav"]
+required = true
+
+[inputs.day]
+type = "date"
+default = "today"
+prompt = "Which day's note?"
+ask = "never"
+
+[outputs.note]
+type = "file"
+path = "@obsidian/Daily/{day:%Y-%m-%d}.md"
+write = "append"
+
+[outputs.summary]
+type = "text"
+to = ["notification", "clipboard"]
+
+[ai]
+uses = ["transcribe", "reason"]
+
+[permissions]
+read = ["@inbox"]
+write = ["@obsidian/Daily"]
+
+[router]
+examples = ["log this voice memo", "add this recording to today's note"]
+
+[test]
+smoke = "tests/smoke.py"
+fixtures = ["tests/sample.m4a"]

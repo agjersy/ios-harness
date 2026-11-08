@@ -1,0 +1,27 @@
+schema = 1
+
+[app]
+id = "hello"
+name = "Hello harness"
+version = "0.1.0"
+description = "Echo text back to confirm the Shortcuts bridge works. No AI, no network."
+entry = "main:run"
+
+[runtime]
+dependencies = []
+mode = "extension"
+
+[inputs.text]
+type = "dictation"
+prompt = "Say something"
+required = true
+
+[outputs.reply]
+type = "text"
+to = ["show", "clipboard"]
+
+[router]
+examples = ["test the harness", "say hello"]
+
+[test]
+smoke = "tests/smoke.py"
