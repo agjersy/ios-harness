@@ -15,7 +15,7 @@ def _print(obj) -> None:
     print(json.dumps(obj, indent=2, ensure_ascii=False, default=str))
 
 
-def main(argv=None) -> int:
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="harness", description="iOS Python harness")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -61,7 +61,7 @@ def main(argv=None) -> int:
             except Exception as e:
                 resp = {"id": args.request, "status": "error", "error": f"{type(e).__name__}: {e}"}
             bridge.write_response(cfg, args.request, resp)
-            print(resp.get("show") or resp.get("error") or resp["status"])
+            _print(resp)  # Shortcuts reads this from the command output
             return 0
         req = json.loads(args.json) if args.json else {}
         if args.app:
@@ -94,3 +94,14 @@ def main(argv=None) -> int:
             print(f"{a['id']:24} {a['name']}")
         return 0
     return 1
+
+
+def main(argv=None) -> int:
+    try:
+        return _main(argv)
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return 1

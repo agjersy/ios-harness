@@ -22,7 +22,9 @@ DEFAULT_CONFIG = '''\
 
 [aliases]
 # @name -> folder. For folders outside a-Shell (Obsidian vault, iWriter),
-# run pickFolder, then pwd, and paste the printed path here.
+# run pickFolder, cd into it, then run:
+#   python -c "import os; print(os.getcwd())"
+# and paste the printed path here (pwd shows ~name, which won't work).
 obsidian = "~/Documents/vault"
 iwriter = "~/Documents/iwriter"
 
@@ -122,8 +124,29 @@ class Config:
         return value
 
 
+def _expand(value) -> Path:
+    """Expand ~ and ~/ only. a-Shell shows bookmarks as ~name, which Python can't resolve."""
+    value = str(value)
+    if value == "~" or value.startswith("~/"):
+        return Path(os.path.expanduser(value))
+    if value.startswith("~"):
+        raise ValueError(
+            f"Path {value!r} is an a-Shell bookmark name. Run "
+            "python -c \"import os; print(os.getcwd())\" inside that folder "
+            "and use the printed path instead.")
+    return Path(value)
+
+
+def _default_home() -> Path:
+    """~/Documents/.harness, or beside the repo when HOME is unavailable."""
+    expanded = os.path.expanduser("~")
+    if expanded and expanded != "~":
+        return Path(expanded) / "Documents" / ".harness"
+    return REPO.parent / ".harness"
+
+
 def load(home: Path | None = None) -> Config:
-    home = Path(home or os.environ.get("HARNESS_HOME", "~/Documents/.harness")).expanduser()
+    home = _expand(home or os.environ.get("HARNESS_HOME") or _default_home())
     home.mkdir(parents=True, exist_ok=True)
     for sub in ("inbox", "outbox", "deps", "repairs", "errors"):
         (home / sub).mkdir(exist_ok=True)
@@ -136,7 +159,7 @@ def load(home: Path | None = None) -> Config:
 
     data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
     secrets = {k: str(v) for k, v in tomllib.loads(sec_file.read_text(encoding="utf-8")).items()}
-    aliases = {k: Path(v).expanduser() for k, v in data.get("aliases", {}).items()}
+    aliases = {k: _expand(v) for k, v in data.get("aliases", {}).items()}
     aliases.setdefault("inbox", home / "inbox")
     router = data.get("router", {})
 

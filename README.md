@@ -23,9 +23,10 @@ repo/                      <- Working Copy repo, synced to a Files folder
 
 ## Device setup (once)
 
-1. In Working Copy, clone the repo and sync it to a folder in Files.
-2. In a-Shell, run `pickFolder` and choose that folder. Do the same for your
-   Obsidian vault and iWriter folder. After each, run `pwd` to see its path.
+1. In Working Copy, clone the repo and sync it to a folder inside a-Shell.
+2. In a-Shell, run `pickFolder` and choose your Obsidian vault, `cd` into it,
+   and run `python -c "import os; print(os.getcwd())"` to get its real path.
+   (`pwd` shows `~name`, which Python can't resolve.) Repeat for iWriter.
 3. `cd` into the repo folder and run `python -m harness doctor`. This creates
    `~/Documents/.harness/` with default config and secrets files.
 4. Edit `config.toml`: set the `[aliases]` paths from step 2.
@@ -46,21 +47,41 @@ repo/                      <- Working Copy repo, synced to a Files folder
 
 ## Shortcuts protocol
 
-Request, written with a-Shell's Put File to `inbox/<id>.json`
-(attachments go in `inbox/<id>/`):
+A request is a JSON object with four optional keys, written with a-Shell's
+Put File to `inbox/<id>.json`:
 
-```json
-{"app": "voice-to-vault", "inputs": {"audio": "memo.m4a"}}
-{"utterance": "log this to today's note", "attachments": ["memo.m4a"]}
+| Key | Meaning |
+|---|---|
+| `app` | App id to run. Omit to let the router or the menu decide. |
+| `utterance` | What the user said. Used by the router when `app` is missing. |
+| `inputs` | Values keyed by the app's input names. |
+| `id` | Ignored; the file name is the id. Reuse the same id when resending. |
+
+Files go in `inbox/<id>/` and are picked up automatically as attachments,
+then assigned to the app's file inputs in order. Shortcuts may flatten
+`inputs` into a JSON string or leave keys as empty text; both are accepted,
+as are UTF-8 with a BOM and UTF-16.
+
+Run with Execute Command, using the absolute repo path:
+
+```
+cd /absolute/path/to/harness-repo
+python -m harness run --request <id> 2>&1
 ```
 
-Then Execute Command: `cd <repo> ; python -m harness run --request <id>`.
-Read `outbox/<id>.json` with Get File and branch on `status`:
+The command prints the full response JSON (also saved to `outbox/<id>.json`).
+Branch on `status`:
 
 - `ok`: show `show`, post `notification`, copy `clipboard`, open `open_url`
-- `ask`: collect each item in `ask` (type tells you which action), resend with the same id
-- `choose`: show `choices` as a menu, resend with `app` set
+- `ask`: collect each item in `ask` (its `type` picks the action), add the
+  answers to `inputs`, resend with the same id and `app`
+- `choose`: show the keys of `menu`, look up the picked key to get the app id,
+  resend with the same id, that `app`, and the original `utterance`
 - `error`: show `error`; optionally run `repair <app>`
+
+Shortcuts: **Harness Run** (the generic loop above, called only by other
+Shortcuts), **Harness Attach** (receives files, puts them in `inbox/<id>/`,
+outputs `{id}`), and thin wrappers that build a dictionary and call Harness Run.
 
 ## Writing apps
 
@@ -71,16 +92,12 @@ Special keys `_show` and `_open_url` go straight to the Shortcut.
 Smoke tests define `INPUTS` and an optional `check(result, response)`; they run
 with mock models and no file writes.
 
-## Verify on device
+## Device notes
 
-These depend on a-Shell behaviour that could not be tested off-device:
-
-- Python version: needs 3.11+ for `tomllib`, else `pip install tomli` (allowlisted).
-- In-process pip (`pip._internal`) installing into `--target` folders.
-- HTTPS certificates for `urllib`; if requests fail with SSL errors, install
-  `certifi` and point `SSL_CERT_FILE` at it.
-- Access to `pickFolder` folders from Python, and from Shortcuts-launched runs.
-- Whether a-Shell reuses the interpreter between commands (the runner purges
-  app modules either way).
+- Confirmed on a-Shell: in-process pip into `--target` folders, HTTPS via
+  `urllib`, and access to `pickFolder` folders from Python.
+- Needs Python 3.11+ for `tomllib`, else `pip install tomli` (allowlisted).
 - `timeout_s` is a budget that triggers a warning; runs can't be killed mid-way.
 - `voice-to-vault/tests/sample.m4a` is a placeholder; replace it with real audio.
+- Dates sent from Shortcuts must be formatted `yyyy-MM-dd` (or today,
+  yesterday, tomorrow).

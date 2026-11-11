@@ -161,10 +161,11 @@ def route_outputs(m, result: dict, ctx: Ctx) -> dict:
 def route_request(req: dict, cfg) -> dict:
     catalog = router.load_catalog(cfg)
     apps = {a["id"]: a for a in catalog}
-    menu = [{"app": a["id"], "name": a["name"]} for a in catalog]
+    everything = [{"app": a["id"], "name": a["name"]} for a in catalog]
     utterance = (req.get("utterance") or "").strip()
     if not utterance:
-        return {"status": "choose", "choices": menu}
+        return {"status": "choose", "choices": everything,
+                "menu": {c["name"]: c["app"] for c in everything}}
 
     attachments = req.get("attachments") or []
     r = router.route(utterance, cfg, catalog, attachments)
@@ -180,8 +181,9 @@ def route_request(req: dict, cfg) -> dict:
             return {"status": "run", "app": app["id"], "inputs": inputs}
 
     ranked = [i for i in [r["app"], *r["alternatives"]] if i in apps]
-    choices = [{"app": i, "name": apps[i]["name"]} for i in dict.fromkeys(ranked)] or menu
-    resp = {"status": "choose", "choices": choices, "utterance": utterance}
+    choices = [{"app": i, "name": apps[i]["name"]} for i in dict.fromkeys(ranked)] or everything
+    resp = {"status": "choose", "choices": choices, "utterance": utterance,
+            "menu": {c["name"]: c["app"] for c in choices}}
     if r.get("warning"):
         resp["warning"] = r["warning"]
     return resp
@@ -206,7 +208,10 @@ def handle(req: dict, cfg) -> dict:
             req = {**req, "app": app_id, "inputs": routed["inputs"]}
 
         m = manifest.load(cfg.apps_dir / app_id)
-        provided = req.get("inputs") or {}
+        provided = dict(req.get("inputs") or {})
+        unfilled = [n for n, s in m.inputs.items() if s.get("type") == "file" and not provided.get(n)]
+        for name, attachment in zip(unfilled, req.get("attachments") or []):
+            provided[name] = attachment
         values, ask = resolve_inputs(m, provided, cfg, [cfg.inbox / run_id, cfg.inbox, m.root])
         if ask:
             resp.update(status="ask", app=m.id, ask=ask, inputs=provided)
