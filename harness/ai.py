@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 
@@ -20,19 +21,28 @@ class AIError(Exception):
     pass
 
 
+class EgressBlocked(AIError):
+    """A strict app tried to send something the gate can't make safe."""
+
+
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_BASE = "https://api.openai.com/v1"
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".gif": "image/gif", ".webp": "image/webp"}
+TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".json", ".log", ".xml", ".html", ".ofx", ".qfx"}
 AUDIO_TYPES = {".m4a", ".mp3", ".wav", ".mp4", ".webm", ".mpeg", ".mpga", ".ogg", ".flac"}
 
 
 class AIClient:
-    def __init__(self, cfg, allowed: set | None = None, on_call=None, models: dict | None = None):
+    def __init__(self, cfg, allowed: set | None = None, on_call=None, models: dict | None = None,
+                 gate=None, audit: Path | None = None, app_id: str | None = None):
         self.cfg = cfg
         self.allowed = allowed
         self.on_call = on_call
         self.models = models or cfg.models
+        self.gate = gate      # a Redactor: set for strict apps
+        self.audit = audit    # folder for the log of what was actually sent
+        self.app_id = app_id
 
     def __call__(self, capability: str, prompt: str | None = None, *, file=None,
                  system: str | None = None, max_tokens: int = 1024, as_json: bool = False):
@@ -45,14 +55,41 @@ class AIClient:
         if not provider:
             raise AIError(f"Unknown provider '{spec.get('provider')}'")
 
+        file = Path(file) if file else None
+        if self.gate is not None:
+            prompt, system, file = self._gated(capability, spec, prompt, system, file)
+
         start = time.monotonic()
         text = provider(self.cfg, spec, capability=capability, prompt=prompt,
-                        file=Path(file) if file else None, system=system,
-                        max_tokens=max_tokens)
+                        file=file, system=system, max_tokens=max_tokens)
         if self.on_call:
             self.on_call({"capability": capability, "provider": spec.get("provider"),
                           "model": spec.get("model"), "ms": int((time.monotonic() - start) * 1000)})
-        return parse_json(text) if as_json else text
+        result = parse_json(text) if as_json else text
+        return self.gate.restore(result) if self.gate is not None else result
+
+    def _gated(self, capability, spec, prompt, system, file):
+        """Egress gate: redact, verify, record. Raises instead of sending anything doubtful."""
+        if file is not None:
+            if file.suffix.lower() not in TEXT_TYPES:
+                raise EgressBlocked(
+                    f"A strict app can't send a {file.suffix or 'binary'} file to a model, because it "
+                    "can't be redacted. Extract the text on the device and send that.")
+            prompt = file.read_text(encoding="utf-8", errors="replace") + "\n\n" + (prompt or "")
+        prompt = self.gate.redact(prompt or "")
+        system = self.gate.redact(system) if system else system
+        leaked = self.gate.leaks(prompt + "\n" + (system or ""))
+        if leaked:
+            raise EgressBlocked("Not sent: your " + ", ".join(leaked) +
+                                " would still be readable after redaction.")
+        if self.audit is not None:
+            self.audit.mkdir(parents=True, exist_ok=True)
+            entry = {"ts": datetime.now().isoformat(timespec="seconds"), "app": self.app_id,
+                     "capability": capability, "provider": spec.get("provider"),
+                     "model": spec.get("model"), "system": system, "prompt": prompt}
+            with open(self.audit / f"{datetime.now():%Y-%m-%d}.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return prompt, system, None
 
 
 def parse_json(text: str):
@@ -155,8 +192,8 @@ def _openai(cfg, spec, *, prompt, file, system, max_tokens, **_):
 
 def _mock(cfg, spec, *, capability, prompt, file, **_):
     """Offline provider for smoke tests: no network, no cost."""
-    if "reply" in spec:
-        return spec["reply"]
+    if "reply" in spec:  # a list is used up one reply per call
+        return spec["reply"].pop(0) if isinstance(spec["reply"], list) else spec["reply"]
     source = prompt or (file.name if file else "")
     return f"[mock {capability}] {source[:200]}"
 

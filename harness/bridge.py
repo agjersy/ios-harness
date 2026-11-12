@@ -72,6 +72,15 @@ def read_request(cfg, req_id: str) -> dict:
 
 
 def write_response(cfg, req_id: str, resp: dict) -> None:
+    """Save the response for Get File. A strict app's response is printed for
+    the Shortcut but not saved, and its request and attachments are deleted
+    as soon as the run finishes."""
+    if resp.get("privacy") == "strict":
+        if resp.get("status") in ("ok", "error"):
+            (cfg.inbox / f"{req_id}.json").unlink(missing_ok=True)
+            shutil.rmtree(cfg.inbox / req_id, ignore_errors=True)
+        resp = {k: resp[k] for k in ("id", "status", "app", "privacy") if k in resp}
+        resp["note"] = "Strict app: the full response is in the command output only."
     out = cfg.outbox / f"{req_id}.json"
     tmp = out.with_suffix(".tmp")
     tmp.write_text(json.dumps(resp, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -80,7 +89,7 @@ def write_response(cfg, req_id: str, resp: dict) -> None:
 
 def cleanup(cfg, days: int = 7) -> int:
     cutoff, removed = time.time() - days * 86400, 0
-    for folder in (cfg.inbox, cfg.outbox):
+    for folder in (cfg.inbox, cfg.outbox, cfg.egress, cfg.forge):
         for item in folder.iterdir():
             if item.stat().st_mtime < cutoff:
                 shutil.rmtree(item) if item.is_dir() else item.unlink()

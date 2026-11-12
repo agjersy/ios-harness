@@ -25,6 +25,8 @@ def catalog_entry(m) -> dict:
         "name": m.name,
         "description": m.description,
         "mode": m.mode,
+        "privacy": m.privacy,
+        "actions": list(m.actions),
         "confirm": bool(m.router.get("confirm", False)),
         "examples": m.router.get("examples", []),
         "inputs": {

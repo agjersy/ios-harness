@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .actions import ACTIONS
 from .config import tomllib
 
 SCHEMA_VERSION = 1
@@ -14,6 +15,11 @@ TEXT_TARGETS = {"show", "notification", "clipboard"}
 WRITE_MODES = {"create", "append", "replace"}
 ASK_MODES = {"never", "if_missing", "always"}
 RUN_MODES = {"app", "extension"}
+PRIVACY_MODES = {"standard", "strict"}
+RESERVED_IDS = {"forge"}  # built into the harness
+PROVIDER_KEYS = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}  # only ctx.ai may use these
+HOST_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
+SECRET_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ENTRY_RE = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
 ALIAS_RE = re.compile(r"^@[A-Za-z0-9_-]+(?:/|$)")
@@ -43,6 +49,8 @@ class Manifest:
     permissions: dict
     router: dict
     test: dict
+    privacy: str = "standard"
+    actions: tuple = ()
 
     @property
     def deps_hash(self) -> str:
@@ -82,6 +90,8 @@ def load(app_dir) -> Manifest:
         permissions=data.get("permissions", {}),
         router=data.get("router", {}),
         test=data.get("test", {}),
+        privacy=app.get("privacy", "standard"),
+        actions=tuple(data.get("actions", {}).get("allow", [])),
     )
 
 
@@ -102,6 +112,12 @@ def validate(data: dict, app_dir: Path) -> list:
         e.append("[app].id must be kebab-case")
     if app_id and app_id != app_dir.name:
         e.append(f"[app].id '{app_id}' must match folder name '{app_dir.name}'")
+
+    if app_id in RESERVED_IDS:
+        e.append(f"[app].id '{app_id}' is reserved")
+    strict = app.get("privacy", "standard") == "strict"
+    if app.get("privacy", "standard") not in PRIVACY_MODES:
+        e.append(f"[app].privacy must be one of {sorted(PRIVACY_MODES)}")
 
     entry = app.get("entry", "")
     if entry:
@@ -135,6 +151,24 @@ def validate(data: dict, app_dir: Path) -> list:
         if not ALIAS_RE.match(ref):
             e.append(f"permission path must start with an @alias: {ref}")
     writes = [w.rstrip("/") for w in perms.get("write", [])]
+    for host in perms.get("net", []):
+        if not isinstance(host, str) or not HOST_RE.match(host):
+            e.append(f"[permissions].net entries are bare host names like api.github.com: {host}")
+    if strict and perms.get("net"):
+        e.append("a strict app may not declare [permissions].net; its only way out is ctx.ai")
+    for name in perms.get("secrets", []):
+        if not isinstance(name, str) or not SECRET_RE.match(name):
+            e.append(f"[permissions].secrets entries are names like GITHUB_TOKEN: {name}")
+        elif name in PROVIDER_KEYS:
+            e.append(f"[permissions].secrets may not include {name}; use ctx.ai")
+
+    allow = data.get("actions", {}).get("allow", [])
+    if not isinstance(allow, list):
+        e.append("[actions].allow must be a list")
+    else:
+        for kind in allow:
+            if kind not in ACTIONS:
+                e.append(f"[actions].allow has unknown type '{kind}'; known: {', '.join(sorted(ACTIONS))}")
 
     outputs = data.get("outputs", {})
     if not outputs:

@@ -1,15 +1,21 @@
-"""The ctx object every app receives: AI, guarded file I/O, logging.
+"""The ctx object every app receives: AI, guarded file and network I/O, logging.
 
 The guards catch AI-written code wandering outside its declared folders.
 They are guardrails, not a security sandbox.
 """
 from __future__ import annotations
 
+import json
 import os
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from .ai import AIClient
 from .paths import PathError, is_within, resolve
+from .redact import Redactor
 
 
 class PermissionDenied(Exception):
@@ -39,7 +45,8 @@ def write_file(path: Path, text: str, mode: str = "replace") -> None:
 
 class Ctx:
     def __init__(self, manifest, cfg, values: dict, run_id: str, *,
-                 dry_run: bool = False, models: dict | None = None, extra_read=()):
+                 dry_run: bool = False, models: dict | None = None, extra_read=(),
+                 fetch_mock: dict | None = None):
         self.app = manifest
         self.cfg = cfg
         self.inputs = values
@@ -48,8 +55,15 @@ class Ctx:
         self.calls: list = []
         self.messages: list = []
         self.writes: list = []
-        self.ai = AIClient(cfg, allowed=set(manifest.ai_uses), on_call=self.calls.append, models=models)
+        self.strict = manifest.privacy == "strict"
+        self.redactor = Redactor(cfg.identifiers)  # one token map per run
+        self.ai = AIClient(cfg, allowed=set(manifest.ai_uses), on_call=self.calls.append, models=models,
+                           gate=self.redactor if self.strict else None,
+                           audit=cfg.egress if self.strict and not dry_run else None, app_id=manifest.id)
         perms = manifest.permissions
+        self._net = [h.lower() for h in perms.get("net", [])]
+        self._secrets = set(perms.get("secrets", []))
+        self._fetch_mock = fetch_mock or {}
         self._write = [resolve(p, cfg) for p in perms.get("write", [])]
         self._read = [resolve(p, cfg) for p in perms.get("read", [])] + self._write
         self._read += [manifest.root] + [Path(p).resolve() for p in extra_read]
@@ -94,3 +108,41 @@ class Ctx:
 
     def log(self, msg) -> None:
         self.messages.append(str(msg))
+
+    def secret(self, name: str) -> str:
+        """A key from secrets.toml, if the manifest lists it under [permissions].secrets."""
+        if name not in self._secrets:
+            raise PermissionDenied(f"{self.app.id} may not read secret {name}; declare it under [permissions]")
+        return "mock-secret" if self.dry_run else self.cfg.secret(name)
+
+    def fetch(self, url: str, *, method: str = "GET", headers: dict | None = None,
+              data=None, timeout: int = 60) -> dict:
+        """HTTPS request to a host listed under [permissions].net.
+
+        Returns {"status", "text", "headers"}; HTTP errors come back as a
+        status, not an exception. Pass a dict or list as data to send JSON.
+        """
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or "").lower()
+        if parts.scheme != "https" or not any(host == h or host.endswith("." + h) for h in self._net):
+            raise PermissionDenied(f"{self.app.id} may not fetch {parts.scheme}://{host}; "
+                                   "declare the host under [permissions].net")
+        if self.dry_run:  # smoke tests: FETCH = {"<url prefix>": "<body>"} in smoke.py
+            body = next((b for prefix, b in self._fetch_mock.items() if url.startswith(prefix)), "{}")
+            return {"status": 200, "text": body if isinstance(body, str) else json.dumps(body), "headers": {}}
+
+        headers = dict(headers or {})
+        if isinstance(data, (dict, list)):
+            data = json.dumps(data).encode()
+            headers.setdefault("Content-Type", "application/json")
+        elif isinstance(data, str):
+            data = data.encode()
+        start = time.monotonic()
+        req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                out = {"status": r.status, "text": r.read().decode("utf-8", "replace"), "headers": dict(r.headers)}
+        except urllib.error.HTTPError as e:
+            out = {"status": e.code, "text": e.read().decode("utf-8", "replace"), "headers": dict(e.headers)}
+        self.calls.append({"fetch": host, "status": out["status"], "ms": int((time.monotonic() - start) * 1000)})
+        return out

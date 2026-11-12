@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 
-from . import bridge, config, runner
+from . import bridge, config, quarantine, runner
+from .contract import text as contract_text
 from .doctor import doctor
 from .repair import repair
 from .router import load_catalog
@@ -34,6 +35,9 @@ def _main(argv=None) -> int:
     ro.add_argument("text")
     rp = sub.add_parser("repair", help="propose a fix for an app's last crash")
     rp.add_argument("app")
+    pr = sub.add_parser("promote", help="end quarantine for an app Forge built")
+    pr.add_argument("app")
+    sub.add_parser("contract", help="print the app-writing rules given to models")
     sub.add_parser("doctor", help="check device setup")
     sub.add_parser("list", help="list apps in the catalog")
 
@@ -83,6 +87,15 @@ def _main(argv=None) -> int:
         _print(repair(args.app, cfg))
         return 0
 
+    if args.cmd == "promote":
+        found = quarantine.promote(cfg, args.app)
+        print(f"{args.app} is out of quarantine" if found else f"{args.app} was not in quarantine")
+        return 0
+
+    if args.cmd == "contract":
+        print(contract_text())
+        return 0
+
     if args.cmd == "doctor":
         checks = doctor(cfg)
         for name, ok, detail in checks:
@@ -91,7 +104,10 @@ def _main(argv=None) -> int:
 
     if args.cmd == "list":
         for a in load_catalog(cfg):
-            print(f"{a['id']:24} {a['name']}")
+            left = quarantine.remaining(cfg, a["id"])
+            flags = [a.get("privacy")] if a.get("privacy") == "strict" else []
+            flags += [f"quarantine: {left} runs left"] if left else []
+            print(f"{a['id']:24} {a['name']}" + (f"  [{', '.join(flags)}]" if flags else ""))
         return 0
     return 1
 

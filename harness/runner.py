@@ -10,9 +10,12 @@ import traceback
 import uuid
 from pathlib import Path
 
-from . import deps, manifest, router
+from . import actions, deps, manifest, quarantine, router
 from .context import Ctx
 from .paths import resolve
+from .redact import Redactor, safe_traceback
+
+FORGE = {"app": "forge", "name": "Build a new app"}
 
 RELATIVE_DAYS = {"today": 0, "yesterday": -1, "tomorrow": 1}
 
@@ -131,8 +134,12 @@ def _as_text(value) -> str:
     return value if isinstance(value, str) else json.dumps(value, indent=2, ensure_ascii=False, default=str)
 
 
-def route_outputs(m, result: dict, ctx: Ctx) -> dict:
+def route_outputs(m, result: dict, ctx: Ctx, confirm_all: bool = False) -> dict:
     resp, texts = {"status": "ok", "app": m.id}, {}
+    # Check actions before writing files, so a bad action leaves nothing half done.
+    todo = actions.validate(result.get("_actions"), m.actions, ctx.cfg, ctx.run_id, confirm_all)
+    if todo:
+        resp["actions"] = todo
     for name, spec in m.outputs.items():
         value = result.get(name)
         if value is None:
@@ -161,7 +168,7 @@ def route_outputs(m, result: dict, ctx: Ctx) -> dict:
 def route_request(req: dict, cfg) -> dict:
     catalog = router.load_catalog(cfg)
     apps = {a["id"]: a for a in catalog}
-    everything = [{"app": a["id"], "name": a["name"]} for a in catalog]
+    everything = [{"app": a["id"], "name": a["name"]} for a in catalog] + [FORGE]
     utterance = (req.get("utterance") or "").strip()
     if not utterance:
         return {"status": "choose", "choices": everything,
@@ -181,7 +188,7 @@ def route_request(req: dict, cfg) -> dict:
             return {"status": "run", "app": app["id"], "inputs": inputs}
 
     ranked = [i for i in [r["app"], *r["alternatives"]] if i in apps]
-    choices = [{"app": i, "name": apps[i]["name"]} for i in dict.fromkeys(ranked)] or everything
+    choices = [{"app": i, "name": apps[i]["name"]} for i in dict.fromkeys(ranked)] + [FORGE] if ranked else everything
     resp = {"status": "choose", "choices": choices, "utterance": utterance,
             "menu": {c["name"]: c["app"] for c in choices}}
     if r.get("warning"):
@@ -197,8 +204,13 @@ def _log_run(cfg, entry: dict) -> None:
 def handle(req: dict, cfg) -> dict:
     run_id = req.get("id") or uuid.uuid4().hex[:12]
     start = time.monotonic()
-    resp, ctx, app_id = {"id": run_id}, None, req.get("app")
+    resp, ctx, m, app_id = {"id": run_id}, None, None, req.get("app")
+    logged_error = None
     try:
+        if app_id == FORGE["app"]:
+            from . import forge  # imported here: forge -> sync -> runner
+            resp.update(forge.handle({**req, "id": run_id}, cfg))
+            return resp
         if not app_id:
             routed = route_request(req, cfg)
             if routed["status"] != "run":
@@ -208,6 +220,8 @@ def handle(req: dict, cfg) -> dict:
             req = {**req, "app": app_id, "inputs": routed["inputs"]}
 
         m = manifest.load(cfg.apps_dir / app_id)
+        if m.privacy == "strict":
+            resp["privacy"] = "strict"  # tells the bridge to keep this response off disk
         provided = dict(req.get("inputs") or {})
         unfilled = [n for n, s in m.inputs.items() if s.get("type") == "file" and not provided.get(n)]
         for name, attachment in zip(unfilled, req.get("attachments") or []):
@@ -220,21 +234,31 @@ def handle(req: dict, cfg) -> dict:
         deps_dir = deps.ensure(m, cfg)
         files = [v for v in values.values() if isinstance(v, Path)]
         ctx = Ctx(m, cfg, values, run_id, extra_read=[cfg.inbox / run_id, *files])
+        on_probation = quarantine.remaining(cfg, m.id) > 0
         result = invoke(m, deps_dir, ctx, values)
-        resp.update(route_outputs(m, result, ctx))
+        resp.update(route_outputs(m, result, ctx, confirm_all=on_probation))
+        if on_probation:
+            resp["quarantine_runs_left"] = quarantine.tick(cfg, m.id)
 
         elapsed = time.monotonic() - start
         if elapsed > m.timeout_s:
             resp["warning"] = f"Took {elapsed:.0f}s, over the {m.timeout_s}s budget"
     except Exception as e:
+        # The person sees the full message. What is stored, and what `repair`
+        # later sends to a model, is redacted; strict apps keep no message at all.
+        strict = m is not None and m.privacy == "strict"
+        redactor = ctx.redactor if ctx else Redactor(cfg.identifiers)
         resp.update(status="error", app=app_id, error=f"{type(e).__name__}: {e}")
+        logged_error = type(e).__name__ if strict else redactor.redact(resp["error"])
         if app_id:
-            (cfg.errors / f"{app_id}.txt").write_text(traceback.format_exc(), encoding="utf-8")
+            (cfg.errors / f"{app_id}.txt").write_text(safe_traceback(e, redactor, withhold=strict),
+                                                      encoding="utf-8")
     finally:
         _log_run(cfg, {
             "ts": dt.datetime.now().isoformat(timespec="seconds"), "id": run_id,
             "app": app_id, "status": resp.get("status"),
             "ms": int((time.monotonic() - start) * 1000),
-            "ai": ctx.calls if ctx else [], "error": resp.get("error"),
+            "ai": ctx.calls if ctx else [], "error": logged_error,
+            "actions": [a["type"] for a in resp.get("actions", [])],
         })
     return resp

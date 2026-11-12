@@ -48,6 +48,17 @@ threshold = 0.6
 [repair]
 capability = "reason"
 
+[forge]
+# Forge writes new apps from a spoken request. New apps start in quarantine:
+# for their first runs every action asks before it happens.
+capability = "reason"
+rounds = 2
+quarantine_runs = 3
+
+[actions]
+# Shortcuts that apps may start with the shortcut.run action.
+shortcuts = []
+
 [packages]
 # Top-level packages apps may declare. Pure-Python only.
 allow = [
@@ -60,6 +71,15 @@ DEFAULT_SECRETS = '''\
 # API keys. Stays on this device. Environment variables override these.
 ANTHROPIC_API_KEY = ""
 OPENAI_API_KEY = ""
+
+# Your own details. Apps marked privacy = "strict" replace these (and
+# pattern matches such as card numbers and emails) with tokens before any
+# text is sent to a model, and refuse to send if one slips through.
+# Spacing, case and punctuation are ignored when matching.
+[identifiers]
+# name = ["Jane Q. Doe", "Doe"]
+# address = ["12 Elm Street"]
+# account = ["000123456789"]
 '''
 
 
@@ -81,6 +101,11 @@ class Config:
     models: dict
     allowlist: set
     secrets: dict
+    identifiers: dict
+    action_shortcuts: set
+    forge_capability: str = "reason"
+    forge_rounds: int = 2
+    quarantine_runs: int = 3
     router_capability: str = "fast"
     router_threshold: float = 0.6
     repair_capability: str = "reason"
@@ -108,6 +133,18 @@ class Config:
     @property
     def errors(self) -> Path:
         return self.home / "errors"
+
+    @property
+    def egress(self) -> Path:
+        return self.home / "egress"
+
+    @property
+    def forge(self) -> Path:
+        return self.home / "forge"
+
+    @property
+    def quarantine_path(self) -> Path:
+        return self.home / "quarantine.json"
 
     @property
     def catalog_path(self) -> Path:
@@ -148,7 +185,7 @@ def _default_home() -> Path:
 def load(home: Path | None = None) -> Config:
     home = _expand(home or os.environ.get("HARNESS_HOME") or _default_home())
     home.mkdir(parents=True, exist_ok=True)
-    for sub in ("inbox", "outbox", "deps", "repairs", "errors"):
+    for sub in ("inbox", "outbox", "deps", "repairs", "errors", "egress", "forge"):
         (home / sub).mkdir(exist_ok=True)
 
     cfg_file, sec_file = home / "config.toml", home / "secrets.toml"
@@ -158,10 +195,14 @@ def load(home: Path | None = None) -> Config:
         sec_file.write_text(DEFAULT_SECRETS, encoding="utf-8")
 
     data = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
-    secrets = {k: str(v) for k, v in tomllib.loads(sec_file.read_text(encoding="utf-8")).items()}
+    sec_data = tomllib.loads(sec_file.read_text(encoding="utf-8"))
+    secrets = {k: str(v) for k, v in sec_data.items() if not isinstance(v, (dict, list))}
+    identifiers = {label: [values] if isinstance(values, str) else [str(v) for v in values]
+                   for label, values in sec_data.get("identifiers", {}).items()}
     aliases = {k: _expand(v) for k, v in data.get("aliases", {}).items()}
     aliases.setdefault("inbox", home / "inbox")
     router = data.get("router", {})
+    forge = data.get("forge", {})
 
     return Config(
         home=home,
@@ -170,6 +211,11 @@ def load(home: Path | None = None) -> Config:
         models=data.get("models", {}),
         allowlist={norm_pkg(p) for p in data.get("packages", {}).get("allow", [])},
         secrets=secrets,
+        identifiers=identifiers,
+        action_shortcuts=set(data.get("actions", {}).get("shortcuts", [])),
+        forge_capability=forge.get("capability", "reason"),
+        forge_rounds=int(forge.get("rounds", 2)),
+        quarantine_runs=int(forge.get("quarantine_runs", 3)),
         router_capability=router.get("capability", "fast"),
         router_threshold=float(router.get("threshold", 0.6)),
         repair_capability=data.get("repair", {}).get("capability", "reason"),

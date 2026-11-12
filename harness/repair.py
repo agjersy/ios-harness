@@ -5,15 +5,14 @@ import json
 from datetime import datetime
 
 from .ai import AIClient
+from .contract import text as contract_text
 
 PROMPT = """An app for a Python harness on iOS crashed. Propose a fix.
 
-Rules:
-- The entry function is called as run(ctx, **inputs) and returns a dict keyed by output names.
-- File I/O goes through ctx.read_text / ctx.write_text with @alias paths.
-- AI calls go through ctx.ai(capability, prompt, file=...).
-- Standard library plus the declared dependencies only. Pure Python only.
-- Change as little as possible.
+Change as little as possible and keep to the contract below. The traceback has
+had personal data removed: tokens like [[NAME_1]] and withheld messages are expected.
+
+{contract}
 
 Manifest (app.toml):
 {manifest}
@@ -38,7 +37,8 @@ def repair(app_id: str, cfg) -> dict:
     sources = {str(p.relative_to(app_dir)): p.read_text(encoding="utf-8")
                for p in sorted(app_dir.rglob("*.py")) if "tests" not in p.relative_to(app_dir).parts}
     prompt = PROMPT.format(manifest=(app_dir / "app.toml").read_text(encoding="utf-8"),
-                           sources=json.dumps(sources, indent=1), tb=tb)
+                           sources=json.dumps(sources, indent=1), tb=tb,
+                           contract=contract_text())
     out = AIClient(cfg)(cfg.repair_capability, prompt, max_tokens=8000, as_json=True)
 
     dest = cfg.repairs / f"{app_id}-{datetime.now():%Y%m%d-%H%M%S}"

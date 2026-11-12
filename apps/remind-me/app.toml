@@ -1,0 +1,35 @@
+schema = 1
+
+[app]
+id = "remind-me"
+name = "Remind me"
+version = "0.1.0"
+description = "Create a reminder from what you say. No AI, no network; use it to test typed actions."
+entry = "main:run"
+
+[runtime]
+dependencies = []
+mode = "extension"
+
+[inputs.text]
+type = "dictation"
+prompt = "Remind you of what?"
+required = true
+
+[inputs.day]
+type = "date"
+default = "tomorrow"
+ask = "never"
+
+[outputs.reply]
+type = "text"
+to = ["show"]
+
+[actions]
+allow = ["reminder.create"]
+
+[router]
+examples = ["remind me to call the bank", "add a reminder for tomorrow"]
+
+[test]
+smoke = "tests/smoke.py"

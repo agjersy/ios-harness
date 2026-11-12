@@ -16,7 +16,11 @@ from .manifest import ManifestError, load
 from .paths import ALIAS_REF
 from .runner import invoke, resolve_inputs, route_outputs
 
-DISCOURAGED_IMPORTS = {"subprocess", "socket", "shutil", "ctypes", "multiprocessing"}
+DISCOURAGED_IMPORTS = {"subprocess", "shutil", "ctypes", "multiprocessing"}
+# Ways around ctx.ai and ctx.fetch. Errors for strict and Forge-built apps, warnings otherwise.
+BYPASS_IMPORTS = {"urllib", "http", "socket", "ssl", "requests", "httpx", "ftplib", "smtplib",
+                  "imaplib", "poplib", "webbrowser", "importlib"}
+BYPASS_CALLS = {"eval", "exec", "__import__"}
 DISCOURAGED_OS_CALLS = {"remove", "unlink", "rename", "replace", "rmdir", "removedirs", "makedirs"}
 
 
@@ -34,12 +38,24 @@ def check_against_config(m, cfg) -> list:
         match = ALIAS_REF.match(ref)
         if match and match.group(1) not in cfg.aliases:
             errors.append(f"alias @{match.group(1)} is not defined on this device")
+    for name in m.permissions.get("secrets", []):
+        try:
+            cfg.secret(name)
+        except KeyError:
+            errors.append(f"secret {name} is not set on this device")
     return errors
 
 
-def lint(m) -> tuple:
-    """Flag code that bypasses ctx. Warnings, not errors: some apps need these."""
+def lint(m, hard: bool = False) -> tuple:
+    """Flag code that bypasses ctx. Mostly warnings: some apps need these.
+
+    For strict apps (and when hard=True, as Forge asks) anything that could
+    reach the network or the device config without going through ctx is an
+    error. This catches honest mistakes in generated code. It is not a sandbox.
+    """
     errors, warnings = [], []
+    hard = hard or m.privacy == "strict"
+    bypass = errors if hard else warnings
     for py in m.root.rglob("*.py"):
         rel = py.relative_to(m.root)
         if "tests" in rel.parts:
@@ -55,9 +71,16 @@ def lint(m) -> tuple:
                 for n in names:
                     if n.split(".")[0] in DISCOURAGED_IMPORTS:
                         warnings.append(f"{rel}:{node.lineno} imports {n}")
+                    elif n.split(".")[0] in BYPASS_IMPORTS:
+                        bypass.append(f"{rel}:{node.lineno} imports {n}; use ctx.ai or ctx.fetch")
+            elif isinstance(node, ast.Attribute) and node.attr == "cfg" \
+                    and isinstance(node.value, ast.Name) and node.value.id == "ctx":
+                bypass.append(f"{rel}:{node.lineno} reads ctx.cfg; use ctx.secret and ctx.path")
             elif isinstance(node, ast.Call):
                 f = node.func
-                if isinstance(f, ast.Name) and f.id == "open":
+                if isinstance(f, ast.Name) and f.id in BYPASS_CALLS:
+                    bypass.append(f"{rel}:{node.lineno} calls {f.id}()")
+                elif isinstance(f, ast.Name) and f.id == "open":
                     mode = node.args[1] if len(node.args) > 1 else next(
                         (k.value for k in node.keywords if k.arg == "mode"), None)
                     if isinstance(mode, ast.Constant) and any(c in str(mode.value) for c in "wax+"):
@@ -81,7 +104,8 @@ def smoke(m, cfg, deps_dir):
         if ask:
             return "smoke INPUTS is missing: " + ", ".join(a["name"] for a in ask)
         mock = {cap: {"provider": "mock"} for cap in cfg.models}
-        ctx = Ctx(m, cfg, values, "smoke", dry_run=True, models=mock)
+        ctx = Ctx(m, cfg, values, "smoke", dry_run=True, models=mock,
+                  fetch_mock=getattr(mod, "FETCH", None))
         result = invoke(m, deps_dir, ctx, values)
         response = route_outputs(m, result, ctx)
         check = getattr(mod, "check", None)

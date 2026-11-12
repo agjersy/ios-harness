@@ -28,5 +28,12 @@ def doctor(cfg) -> list:
             ok = False
         checks.append((f"{provider} key", ok, key or "unknown provider"))
 
+    count = sum(len(v) for v in cfg.identifiers.values())
+    short = [v for vals in cfg.identifiers.values() for v in vals if len(v.replace(" ", "")) < 4]
+    detail = f"{count} set" if count else "none set; strict apps will redact patterns only"
+    if short:
+        detail += f"; {len(short)} shorter than 4 characters are redacted but can't block a send"
+    checks.append(("Identifiers", True, detail))
+
     checks.append(("Catalog", cfg.catalog_path.exists(), "run sync" if not cfg.catalog_path.exists() else "present"))
     return checks
