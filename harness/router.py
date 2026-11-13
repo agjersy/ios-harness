@@ -11,10 +11,14 @@ SYSTEM = "You route spoken requests to the right app. Reply with JSON only."
 PROMPT = """Apps:
 {catalog}
 
+Today is {today}.
 Attachments: {attachments}
 Request: {utterance}
 
 Pick the best app and fill any non-file inputs you can infer from the request.
+Write dates as YYYY-MM-DD and date-times as YYYY-MM-DDTHH:MM:SS, working them
+out from today's date. Leave out any input the request does not state.
+Tokens like [[NAME_1]] stand for personal details; copy them as they are.
 Reply with JSON only:
 {{"app": "<id or null>", "inputs": {{}}, "confidence": <0.0 to 1.0>, "alternatives": ["<id>"]}}"""
 
@@ -55,7 +59,8 @@ def route(utterance: str, cfg, catalog: list, attachments=()) -> dict:
                         for n, s in a["inputs"].items()}}
             for a in catalog]
     prompt = PROMPT.format(catalog=json.dumps(slim, indent=1, default=str),
-                           attachments=", ".join(attachments) or "none", utterance=utterance)
+                           attachments=", ".join(attachments) or "none", utterance=utterance,
+                           today=f"{datetime.now():%A %Y-%m-%d, %H:%M}")
     try:
         out = AIClient(cfg)(cfg.router_capability, prompt, system=SYSTEM, max_tokens=400, as_json=True)
     except AIError as e:

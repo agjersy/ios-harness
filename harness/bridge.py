@@ -45,7 +45,18 @@ def _loads(text: str):
     return value
 
 
+ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$")
+
+
+def check_id(req_id) -> str:
+    """A request id names files in several folders, so it must be a plain name."""
+    if not isinstance(req_id, str) or not ID_RE.match(req_id) or len(req_id) > 80:
+        raise ValueError("Request id must be letters, digits, '-', '_' or '.', at most 80 characters")
+    return req_id
+
+
 def read_request(cfg, req_id: str) -> dict:
+    check_id(req_id)
     path = cfg.inbox / f"{req_id}.json"
     if not path.exists():
         raise FileNotFoundError(f"No request file {path.name} in inbox")
@@ -72,14 +83,19 @@ def read_request(cfg, req_id: str) -> dict:
 
 
 def write_response(cfg, req_id: str, resp: dict) -> None:
-    """Save the response for Get File. A strict app's response is printed for
-    the Shortcut but not saved, and its request and attachments are deleted
-    as soon as the run finishes."""
-    if resp.get("privacy") == "strict":
-        if resp.get("status") in ("ok", "error"):
-            (cfg.inbox / f"{req_id}.json").unlink(missing_ok=True)
-            shutil.rmtree(cfg.inbox / req_id, ignore_errors=True)
-        resp = {k: resp[k] for k in ("id", "status", "app", "privacy") if k in resp}
+    """Save the response for Get File and clear out what the run no longer needs.
+
+    A finished run (ok) deletes its request and attachments. A strict app's
+    response is printed for the Shortcut but not saved, and its request and
+    attachments also go when it fails."""
+    check_id(req_id)
+    strict = resp.get("privacy") == "strict"
+    if resp.get("status") == "ok" or (strict and resp.get("status") == "error"):
+        (cfg.inbox / f"{req_id}.json").unlink(missing_ok=True)
+        shutil.rmtree(cfg.inbox / req_id, ignore_errors=True)
+        (cfg.pending / f"{req_id}.json").unlink(missing_ok=True)
+    if strict:
+        resp = {k: resp[k] for k in ("id", "protocol", "status", "app", "privacy") if k in resp}
         resp["note"] = "Strict app: the full response is in the command output only."
     out = cfg.outbox / f"{req_id}.json"
     tmp = out.with_suffix(".tmp")
@@ -88,10 +104,15 @@ def write_response(cfg, req_id: str, resp: dict) -> None:
 
 
 def cleanup(cfg, days: int = 7) -> int:
+    """Remove leftovers older than `days`. Runs after every Shortcuts request
+    and every sync, and never fails a run."""
     cutoff, removed = time.time() - days * 86400, 0
-    for folder in (cfg.inbox, cfg.outbox, cfg.egress, cfg.forge):
-        for item in folder.iterdir():
-            if item.stat().st_mtime < cutoff:
-                shutil.rmtree(item) if item.is_dir() else item.unlink()
-                removed += 1
+    for folder in (cfg.inbox, cfg.outbox, cfg.egress, cfg.forge, cfg.pending):
+        try:
+            for item in folder.iterdir():
+                if item.stat().st_mtime < cutoff:
+                    shutil.rmtree(item) if item.is_dir() else item.unlink()
+                    removed += 1
+        except OSError:
+            continue
     return removed

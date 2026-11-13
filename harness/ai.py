@@ -192,8 +192,13 @@ def _openai(cfg, spec, *, prompt, file, system, max_tokens, **_):
 
 def _mock(cfg, spec, *, capability, prompt, file, **_):
     """Offline provider for smoke tests: no network, no cost."""
-    if "reply" in spec:  # a list is used up one reply per call
-        return spec["reply"].pop(0) if isinstance(spec["reply"], list) else spec["reply"]
+    if "reply" in spec:  # a list is used up one reply per call; the last one repeats
+        reply = spec["reply"]
+        if isinstance(reply, list):
+            if not reply:
+                raise AIError(f"mock '{capability}' has no replies left")
+            return reply.pop(0) if len(reply) > 1 else reply[0]
+        return reply
     source = prompt or (file.name if file else "")
     return f"[mock {capability}] {source[:200]}"
 

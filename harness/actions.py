@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import datetime as dt
 
+from . import when
+
 SHORTCUT_PREFIX = "Harness Act "
-RELATIVE_DAYS = {"today": 0, "yesterday": -1, "tomorrow": 1}
+DISPATCHER = "Harness Act"  # one Shortcut for every type, if [actions] single_shortcut is on
+URL_ALWAYS_REFUSED = {"shortcuts", "javascript", "data", "file"}
 
 # field -> (kind, required). Kinds: str, when, bool, strlist.
 ACTIONS = {
@@ -44,15 +47,11 @@ def _when(value) -> str:
         return value.isoformat(timespec="seconds")
     if isinstance(value, dt.date):
         return value.isoformat()
-    s = str(value).strip()
-    if s.lower() in RELATIVE_DAYS:
-        return (dt.date.today() + dt.timedelta(days=RELATIVE_DAYS[s.lower()])).isoformat()
     try:
-        if len(s) <= 10:
-            return dt.date.fromisoformat(s).isoformat()
-        return dt.datetime.fromisoformat(s.replace("Z", "+00:00")).isoformat(timespec="seconds")
+        parsed = when.parse(value)
     except ValueError:
         raise ActionError(f"not a date or ISO date-time: {value!r}") from None
+    return parsed.isoformat(timespec="seconds") if isinstance(parsed, dt.datetime) else parsed.isoformat()
 
 
 def _coerce(kind: str, value):
@@ -63,7 +62,7 @@ def _coerce(kind: str, value):
             raise ActionError(f"expected true or false, got {value!r}")
         return value
     if kind == "strlist":
-        items = [value] if isinstance(value, str) else list(value)
+        items = [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple)) else []
         if not items or not all(isinstance(i, str) and i.strip() for i in items):
             raise ActionError("expected one or more non-empty strings")
         return items
@@ -103,7 +102,7 @@ def validate(raw, allowed, cfg, run_id: str, force_confirm: bool = False) -> lis
         if unknown:
             raise ActionError(f"{where}: unknown fields {sorted(unknown)}")
         action = {"id": f"{run_id}-{n}", "type": kind, "tier": spec["tier"],
-                  "shortcut": SHORTCUT_PREFIX + kind}
+                  "shortcut": DISPATCHER if cfg.single_action_shortcut else SHORTCUT_PREFIX + kind}
         for field, (field_kind, required) in spec["fields"].items():
             value = item.get(field)
             if value is None or value == "":
@@ -120,3 +119,21 @@ def validate(raw, allowed, cfg, run_id: str, force_confirm: bool = False) -> lis
         action["summary"] = _summary(kind, action)
         out.append(action)
     return out
+
+
+def check_url(url, schemes, strict: bool = False) -> str:
+    """Check an app's _open_url against the schemes its manifest declares.
+
+    Opening a URL can send data anywhere and can start other apps, so it is
+    declared ([actions] open_url), shown at Forge approval, and refused for
+    strict apps. shortcuts:// is never allowed: use the shortcut.run action,
+    which has its own allowlist."""
+    url = str(url).strip()
+    scheme = url.split(":", 1)[0].lower() if ":" in url else ""
+    if strict:
+        raise ActionError("a strict app may not open URLs")
+    if not scheme or scheme in URL_ALWAYS_REFUSED:
+        raise ActionError(f"_open_url may not use the scheme '{scheme or url[:20]}'")
+    if scheme not in schemes:
+        raise ActionError(f"_open_url scheme '{scheme}' is not declared in [actions].open_url")
+    return url

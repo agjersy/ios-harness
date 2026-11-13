@@ -4,11 +4,14 @@ from __future__ import annotations
 import os
 import sys
 
+from . import PROTOCOL, __version__, quarantine
+
 KEY_FOR_PROVIDER = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
 
 def doctor(cfg) -> list:
     checks = [("Python", sys.version_info >= (3, 9), sys.version.split()[0])]
+    checks.append(("Harness", True, f"{__version__}, Shortcuts protocol {PROTOCOL}"))
     try:
         import pip._internal.cli.main  # noqa: F401
         checks.append(("pip (in-process)", True, "available"))
@@ -34,6 +37,21 @@ def doctor(cfg) -> list:
     if short:
         detail += f"; {len(short)} shorter than 4 characters are redacted but can't block a send"
     checks.append(("Identifiers", True, detail))
+
+    for name, folder in (("Inbox", cfg.inbox), ("Outbox", cfg.outbox)):
+        ok = folder.is_dir() and os.access(folder, os.W_OK)
+        checks.append((name, ok, str(folder) if ok else f"{folder} missing or not writable"))
+    waiting = [p for p in cfg.inbox.iterdir() if not p.name.startswith(".")]
+    if waiting:
+        checks.append(("Inbox leftovers", True, f"{len(waiting)} unfinished request(s); removed after 7 days"))
+    if cfg.action_shortcuts:
+        checks.append(("shortcut.run allowlist", True, ", ".join(sorted(cfg.action_shortcuts))))
+    try:
+        on_probation = {k: v for k, v in quarantine._load(cfg).items() if (cfg.apps_dir / k).is_dir()}
+    except Exception:
+        on_probation = {}
+    if on_probation:
+        checks.append(("Quarantine", True, ", ".join(f"{k} ({v} runs left)" for k, v in sorted(on_probation.items()))))
 
     checks.append(("Catalog", cfg.catalog_path.exists(), "run sync" if not cfg.catalog_path.exists() else "present"))
     return checks

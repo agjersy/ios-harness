@@ -58,6 +58,9 @@ quarantine_runs = 3
 [actions]
 # Shortcuts that apps may start with the shortcut.run action.
 shortcuts = []
+# true: every action names the one Shortcut "Harness Act", which branches on
+# the action's type. Use it if Run Shortcut can't take a name from a variable.
+single_shortcut = false
 
 [packages]
 # Top-level packages apps may declare. Pure-Python only.
@@ -103,6 +106,7 @@ class Config:
     secrets: dict
     identifiers: dict
     action_shortcuts: set
+    single_action_shortcut: bool = False
     forge_capability: str = "reason"
     forge_rounds: int = 2
     quarantine_runs: int = 3
@@ -141,6 +145,15 @@ class Config:
     @property
     def forge(self) -> Path:
         return self.home / "forge"
+
+    @property
+    def pending(self) -> Path:
+        """Router guesses kept between a `choose` reply and the pick."""
+        return self.home / "pending"
+
+    @property
+    def actions_log(self) -> Path:
+        return self.home / "actions.jsonl"
 
     @property
     def quarantine_path(self) -> Path:
@@ -185,7 +198,7 @@ def _default_home() -> Path:
 def load(home: Path | None = None) -> Config:
     home = _expand(home or os.environ.get("HARNESS_HOME") or _default_home())
     home.mkdir(parents=True, exist_ok=True)
-    for sub in ("inbox", "outbox", "deps", "repairs", "errors", "egress", "forge"):
+    for sub in ("inbox", "outbox", "deps", "repairs", "errors", "egress", "forge", "pending"):
         (home / sub).mkdir(exist_ok=True)
 
     cfg_file, sec_file = home / "config.toml", home / "secrets.toml"
@@ -213,6 +226,7 @@ def load(home: Path | None = None) -> Config:
         secrets=secrets,
         identifiers=identifiers,
         action_shortcuts=set(data.get("actions", {}).get("shortcuts", [])),
+        single_action_shortcut=bool(data.get("actions", {}).get("single_shortcut", False)),
         forge_capability=forge.get("capability", "reason"),
         forge_rounds=int(forge.get("rounds", 2)),
         quarantine_runs=int(forge.get("quarantine_runs", 3)),

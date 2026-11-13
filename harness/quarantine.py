@@ -6,6 +6,7 @@ opt out of it.
 from __future__ import annotations
 
 import json
+import os
 
 
 def _load(cfg) -> dict:
@@ -16,7 +17,9 @@ def _load(cfg) -> dict:
 
 
 def _save(cfg, data: dict) -> None:
-    cfg.quarantine_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp = cfg.quarantine_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, cfg.quarantine_path)
 
 
 def remaining(cfg, app_id: str) -> int:
